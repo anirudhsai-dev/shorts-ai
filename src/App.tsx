@@ -833,7 +833,7 @@ export default function App() {
         <div className="lg:col-span-5 space-y-8">
           <section className="space-y-6">
             <div>
-              <h2 className="text-3xl font-bold tracking-tight mb-2">AI Slideshow Generator</h2>
+              <h2 className="text-3xl font-bold tracking-tight mb-2">AI Shorts Generator</h2>
               <p className="text-white/50">Create multi-scene shorts with voiceovers and background music.</p>
             </div>
 
@@ -1261,7 +1261,7 @@ export default function App() {
                     <Video className="w-10 h-10 text-white/20" />
                   </div>
                   <div className="space-y-2">
-                    <p className="text-white/40 font-medium">Slideshow Preview</p>
+                    <p className="text-white/40 font-medium">Short Preview</p>
                     <p className="text-white/20 text-xs">Your multi-scene AI Short will appear here with music and voiceover.</p>
                   </div>
                 </div>
