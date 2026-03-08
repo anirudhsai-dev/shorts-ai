@@ -1411,7 +1411,7 @@ export default function App() {
     </main>
 
       <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-white/5 text-center">
-        <p className="text-white/20 text-xs uppercase tracking-[0.2em]">Powered by Gemini 3 Flash & 2.5 Image</p>
+        <p className="text-white/20 text-xs uppercase tracking-[0.2em]">Anirudh Sai Manepalli</p>
       </footer>
     </div>
   );
