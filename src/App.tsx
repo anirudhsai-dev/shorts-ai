@@ -858,7 +858,7 @@ export default function App() {
               <div className="relative">
                 <input
                   type="text"
-                  placeholder="Or enter custom niche..."
+                  placeholder="Or enter custom content..."
                   value={customNiche}
                   onChange={(e) => { setCustomNiche(e.target.value); setNiche(''); }}
                   className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-orange-500 transition-colors"
