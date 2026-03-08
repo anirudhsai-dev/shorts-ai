@@ -5,6 +5,11 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  server: {
+    allowedHosts: [
+      'shorts-ai-72y9.onrender.com'
+    ]
+  }
   return {
     plugins: [react(), tailwindcss()],
     define: {
