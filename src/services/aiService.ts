@@ -21,6 +21,26 @@ export interface GeneratedScript {
   segments: ScriptSegment[];
 }
 
+export interface RequestLog {
+  id: string;
+  timestamp: Date;
+  provider: AIProvider;
+  model: string;
+  type: 'script' | 'voice' | 'image' | 'preview';
+  status: 'pending' | 'success' | 'error';
+  error?: string;
+  keyIndex: number;
+  apiKey: string;
+  duration?: number;
+}
+
+export interface AIServiceStats {
+  currentKeyIndex: number;
+  keyRequests: number;
+  totalRequests: number;
+  totalKeys: number;
+}
+
 export class AIService {
   private gemini: GoogleGenAI | null = null;
   private openai: OpenAI | null = null;
@@ -31,25 +51,63 @@ export class AIService {
   private scriptModel: string;
   private imageModel: string;
   private apiKey: string;
+  private currentKeyIndex: number = 0;
+  private keys: string[] = [];
+  
+  public keyRequests: number = 0;
+  public totalRequests: number = 0;
+  private logs: RequestLog[] = [];
+  private onUpdate?: (stats: AIServiceStats, logs: RequestLog[]) => void;
 
   constructor(
     apiKey: string, 
     provider: AIProvider = 'gemini',
     scriptModel: string = "gemini-3-flash-preview", 
-    imageModel: string = "gemini-2.5-flash-image"
+    imageModel: string = "gemini-2.5-flash-image",
+    onUpdate?: (stats: AIServiceStats, logs: RequestLog[]) => void
   ) {
-    this.apiKey = apiKey;
     this.provider = provider;
     this.scriptModel = scriptModel;
     this.imageModel = imageModel;
+    this.onUpdate = onUpdate;
 
-    if (provider === 'gemini') {
+    // Initialize keys - ONLY use what the user provides
+    if (apiKey) {
+      // Support comma-separated keys for rotation
+      const rawKeys = apiKey.split(',').map(k => k.trim()).filter(Boolean);
+      
+      // Strict validation for Gemini keys if that's the provider
+      if (provider === 'gemini') {
+        this.keys = rawKeys.filter(k => k.startsWith('AIza'));
+      } else {
+        this.keys = rawKeys;
+      }
+    } else {
+      this.keys = [];
+    }
+
+    if (this.keys.length === 0) {
+      const msg = provider === 'gemini' 
+        ? "Invalid Gemini API Key. Keys must start with 'AIza'. Please check your settings."
+        : "No API keys provided. Please add your API keys in the settings.";
+      throw new Error(msg);
+    }
+
+    this.apiKey = this.keys[0];
+    this.initProvider();
+  }
+
+  private initProvider() {
+    const apiKey = this.apiKey;
+    if (!apiKey) return;
+
+    if (this.provider === 'gemini') {
       this.gemini = new GoogleGenAI({ apiKey });
-    } else if (provider === 'openai') {
+    } else if (this.provider === 'openai') {
       this.openai = new OpenAI({ apiKey, dangerouslyAllowBrowser: true });
-    } else if (provider === 'anthropic') {
+    } else if (this.provider === 'anthropic') {
       this.anthropic = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-    } else if (provider === 'openrouter') {
+    } else if (this.provider === 'openrouter') {
       this.openrouter = new OpenAI({
         apiKey,
         baseURL: "https://openrouter.ai/api/v1",
@@ -62,10 +120,83 @@ export class AIService {
     }
   }
 
-  private async withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 3000): Promise<T> {
+  private notifyUpdate() {
+    if (this.onUpdate) {
+      this.onUpdate(this.getStats(), [...this.logs]);
+    }
+  }
+
+  private rotateKey(): boolean {
+    if (this.keys.length <= 1 || this.currentKeyIndex >= this.keys.length - 1) {
+      return false;
+    }
+    this.currentKeyIndex++;
+    this.apiKey = this.keys[this.currentKeyIndex];
+    this.keyRequests = 0; // Reset requests for the new key
+    this.initProvider();
+    console.log(`Rotated to API Key #${this.currentKeyIndex + 1}`);
+    this.notifyUpdate();
+    return true;
+  }
+
+  private async withRetry<T>(fn: () => Promise<T>, type: RequestLog['type'], retries = 5, delay = 3000): Promise<T> {
+    const logId = Math.random().toString(36).substring(7);
+    const startTime = Date.now();
+    const model = type === 'image' ? this.imageModel : (type === 'voice' ? 'gemini-2.5-flash-preview-tts' : this.scriptModel);
+    
+    const log: RequestLog = {
+      id: logId,
+      timestamp: new Date(),
+      provider: this.provider,
+      model,
+      type,
+      status: 'pending',
+      keyIndex: this.currentKeyIndex,
+      apiKey: this.apiKey
+    };
+    
+    this.logs.push(log);
+    this.notifyUpdate();
+
     try {
-      return await fn();
+      this.keyRequests++;
+      this.totalRequests++;
+      this.notifyUpdate();
+      const result = await fn();
+      
+      // Update log on success
+      const index = this.logs.findIndex(l => l.id === logId);
+      if (index !== -1) {
+        this.logs[index] = { 
+          ...this.logs[index], 
+          status: 'success', 
+          duration: Date.now() - startTime 
+        };
+        this.notifyUpdate();
+      }
+      
+      return result;
     } catch (error: any) {
+      // Update log on error
+      const index = this.logs.findIndex(l => l.id === logId);
+      if (index !== -1) {
+        this.logs[index] = { 
+          ...this.logs[index], 
+          status: 'error', 
+          error: error.message,
+          duration: Date.now() - startTime 
+        };
+        this.notifyUpdate();
+      }
+
+      // Rotate on ANY error as requested by user
+      if (this.rotateKey()) {
+        console.warn("API Error encountered. Rotating to next key...", error);
+        // Small delay before retry with new key
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return this.withRetry(fn, type, retries, delay);
+      }
+
       const is429 = error?.status === 429 || 
                     error?.message?.includes("429") || 
                     error?.message?.includes("RESOURCE_EXHAUSTED") ||
@@ -75,15 +206,21 @@ export class AIService {
       if (is429 && retries > 0) {
         console.warn(`Rate limited (429). Retrying in ${delay}ms... (${retries} retries left)`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        return this.withRetry(fn, retries - 1, delay * 1.5);
-      }
-
-      if (is429) {
-        throw new Error("API Quota Exceeded (429). This usually happens when the shared key is overused. Please provide your own Gemini API key in Settings to bypass this.");
+        return this.withRetry(fn, type, retries - 1, delay * 1.5);
       }
 
       throw error;
     }
+  }
+
+  public getStats() {
+    return {
+      currentKeyIndex: this.currentKeyIndex,
+      keyRequests: this.keyRequests,
+      totalRequests: this.totalRequests,
+      totalKeys: this.keys.length,
+      logs: this.logs
+    };
   }
 
   async generateScript(niche: string, language: string = "English"): Promise<GeneratedScript> {
@@ -142,7 +279,7 @@ export class AIService {
           }
         });
         return JSON.parse(response.text || "{}");
-      });
+      }, 'script');
     } 
     
     if ((this.provider === 'openai' && this.openai) || (this.provider === 'openrouter' && this.openrouter)) {
@@ -203,9 +340,9 @@ export class AIService {
       return `data:audio/mp3;base64,${buffer.toString('base64')}`;
     }
 
-    // Use provided key if available, otherwise fallback to environment key
-    const ttsKey = this.apiKey || process.env.GEMINI_API_KEY || "";
-    if (!ttsKey) throw new Error("Gemini API Key is required for voice generation. Please add it in settings.");
+    // Use current rotated key
+    const ttsKey = this.apiKey;
+    if (!ttsKey) throw new Error("API Key is required for voice generation. Please add it in settings.");
     
     const ttsAi = new GoogleGenAI({ apiKey: ttsKey });
     
@@ -215,20 +352,34 @@ export class AIService {
       throw new Error("No text provided for voiceover generation.");
     }
     
-    const ttsPrompt = `Speak naturally in ${language}: ${text}`;
+    const ttsPrompt = `Speak naturally: ${text}`;
 
-    const response = await this.withRetry(() => ttsAi.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: ttsPrompt }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voice },
+    const response = await this.withRetry(async () => {
+      const res = await ttsAi.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: ttsPrompt }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voice },
+            },
           },
         },
-      },
-    }));
+      });
+
+      // Check if audio is present in the response
+      const hasAudio = res.candidates?.[0]?.content?.parts?.some(p => p.inlineData?.data);
+      if (!hasAudio) {
+        // If it's a safety block or other issue, it might return text instead
+        const textPart = res.candidates?.[0]?.content?.parts?.find(p => p.text)?.text;
+        if (textPart) {
+          throw new Error(`Model returned text instead of audio: ${textPart}`);
+        }
+        throw new Error("Model returned no audio data");
+      }
+      return res;
+    }, 'voice');
 
     // Find the audio part in the response
     let base64Audio: string | undefined;
@@ -342,7 +493,7 @@ export class AIService {
           }
           throw error;
         }
-      });
+      }, 'image');
     }
 
     throw new Error("Image generation failed or provider not supported for images");

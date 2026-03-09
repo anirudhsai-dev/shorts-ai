@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AIService, GeneratedScript, VOICES, VoiceName, AIProvider } from './services/aiService';
+import { AIService, GeneratedScript, VOICES, VoiceName, AIProvider, RequestLog, AIServiceStats } from './services/aiService';
 import { 
   Video, 
   Type, 
@@ -25,7 +25,11 @@ import {
   Copy,
   Check,
   Globe,
-  ExternalLink
+  ExternalLink,
+  History,
+  X,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -93,10 +97,9 @@ export default function App() {
   const [isPreviewingMusic, setIsPreviewingMusic] = useState<string | null>(null);
   const [customMusic, setCustomMusic] = useState<{ name: string, url: string } | null>(null);
 
-  const [userApiKey, setUserApiKey] = useState(process.env.GEMINI_API_KEY || '');
-  const [isTestingKey, setIsTestingKey] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean, message: string } | null>(null);
+  const [userApiKey, setUserApiKey] = useState('');
   const [sessionRequests, setSessionRequests] = useState(0);
+  const [rotationMessage, setRotationMessage] = useState<string | null>(null);
   const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
   const [scriptModel, setScriptModel] = useState('gemini-2.5-flash');
   const [imageModel, setImageModel] = useState('gemini-2.5-flash-image');
@@ -108,12 +111,31 @@ export default function App() {
   const [channelName, setChannelName] = useState('');
   const [platform, setPlatform] = useState<'instagram' | 'youtube'>('youtube');
   const [isRegeneratingImage, setIsRegeneratingImage] = useState<number | null>(null);
-  const [showEndCard, setShowEndCard] = useState(false);
   const [skipFailedImages, setSkipFailedImages] = useState(true);
+  const [isImageGenEnabled, setIsImageGenEnabled] = useState(true);
+  const [sessionStats, setSessionStats] = useState<AIServiceStats>({ currentKeyIndex: 0, keyRequests: 0, totalRequests: 0, totalKeys: 1 });
+  const [sessionLogs, setSessionLogs] = useState<RequestLog[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
+  const [isKeysUnlocked, setIsKeysUnlocked] = useState(false);
+  const [unlockPasscode, setUnlockPasscode] = useState('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const musicRef = useRef<HTMLAudioElement>(null);
+
+  // Pre-load images for canvas
+  const loadedImagesRef = useRef<HTMLImageElement[]>([]);
+  useEffect(() => {
+    if (!images.length) return;
+    
+    const newLoadedImages = images.map(src => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = src;
+      return img;
+    });
+    loadedImagesRef.current = newLoadedImages;
+  }, [images]);
 
   // Canvas rendering loop for recording
   useEffect(() => {
@@ -124,52 +146,20 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Ensure canvas is exactly 9:16
+    canvas.width = 720;
+    canvas.height = 1280;
+
     let animationFrame: number;
     const render = () => {
       // Clear
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      if (showEndCard) {
-        // Draw End Card
-        ctx.fillStyle = '#111';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        // Add subtle gradient
-        const grad = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 0, canvas.width/2, canvas.height/2, canvas.width);
-        grad.addColorStop(0, '#1a1a1a');
-        grad.addColorStop(1, '#000');
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        ctx.fillStyle = 'white';
-        ctx.textAlign = 'center';
-        
-        // Icon/Platform indicator
-        ctx.font = 'bold 24px Inter';
-        ctx.fillStyle = platform === 'instagram' ? '#E1306C' : '#FF0000';
-        ctx.fillText(platform.toUpperCase(), canvas.width / 2, canvas.height / 2 - 80);
-
-        ctx.font = 'bold 60px Inter';
-        ctx.fillStyle = 'white';
-        const actionText = platform === 'instagram' ? 'FOLLOW' : 'SUBSCRIBE';
-        ctx.fillText(actionText, canvas.width / 2, canvas.height / 2);
-        
-        if (channelName) {
-          ctx.font = '30px Inter';
-          ctx.fillStyle = 'rgba(255,255,255,0.6)';
-          ctx.fillText(`@${channelName.replace('@', '')}`, canvas.width / 2, canvas.height / 2 + 60);
-        }
-
-        animationFrame = requestAnimationFrame(render);
-        return;
-      }
-
       // Draw current image
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.src = images[currentSegmentIndex] || images[0];
-      if (img.complete) {
+      const img = loadedImagesRef.current[currentSegmentIndex] || loadedImagesRef.current[0];
+      
+      if (img && img.complete) {
         const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
         const x = (canvas.width / 2) - (img.width / 2) * scale;
         const y = (canvas.height / 2) - (img.height / 2) * scale;
@@ -189,23 +179,23 @@ export default function App() {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // Draw captions
-      if (script.segments[currentSegmentIndex]) {
+      if (script && script.segments[currentSegmentIndex]) {
         ctx.fillStyle = 'white';
-        ctx.font = 'bold 40px Inter';
+        ctx.font = 'bold 60px Inter'; // Increased font size for 720p
         ctx.textAlign = 'center';
         ctx.shadowColor = 'black';
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 15;
         
         const words = script.segments[currentSegmentIndex].text.toUpperCase().split(' ');
         let line = '';
-        let y = canvas.height - 200;
+        let y = canvas.height - 300; // Adjusted for better placement
         for (let n = 0; n < words.length; n++) {
           const testLine = line + words[n] + ' ';
           const metrics = ctx.measureText(testLine);
-          if (metrics.width > canvas.width - 100 && n > 0) {
+          if (metrics.width > canvas.width - 120 && n > 0) {
             ctx.fillText(line, canvas.width / 2, y);
             line = words[n] + ' ';
-            y += 50;
+            y += 70; // Increased line height
           } else {
             line = testLine;
           }
@@ -303,7 +293,6 @@ export default function App() {
       a.download = `short.${extension}`;
       a.click();
       setIsRecording(false);
-      setShowEndCard(false);
     };
 
     recorder.start();
@@ -311,8 +300,7 @@ export default function App() {
     if (musicUrl) music.play();
 
     audio.onended = async () => {
-      // Show end card for 3 seconds
-      setShowEndCard(true);
+      // Wait 3 seconds at the end
       await new Promise(resolve => setTimeout(resolve, 3000));
       recorder.stop();
       if (musicUrl) music.pause();
@@ -321,9 +309,28 @@ export default function App() {
 
   const regenerateImage = async (index: number) => {
     if (!script || isRegeneratingImage !== null) return;
+    const activeKey = userApiKey;
+    if (!activeKey) {
+      setError("API Key is required to regenerate images.");
+      setShowSettings(true);
+      return;
+    }
     setIsRegeneratingImage(index);
     try {
-      const ai = new AIService(userApiKey, aiProvider, scriptModel, imageModel);
+      const ai = new AIService(
+        userApiKey, 
+        aiProvider, 
+        scriptModel, 
+        imageModel,
+        (stats, logs) => {
+          setSessionStats(stats);
+          setSessionLogs(logs);
+          if (stats.currentKeyIndex !== sessionStats.currentKeyIndex) {
+            setRotationMessage(`Switching to API Key #${stats.currentKeyIndex + 1}...`);
+            setTimeout(() => setRotationMessage(null), 3000);
+          }
+        }
+      );
       const newImage = await ai.generateVisual(script.segments[index].visualPrompt);
       const newImages = [...images];
       newImages[index] = newImage;
@@ -350,10 +357,29 @@ export default function App() {
   };
   const previewVoice = async (v: VoiceName) => {
     if (isPreviewingVoice) return;
+    const activeKey = userApiKey;
+    if (!activeKey) {
+      setError("API Key is required to preview voices.");
+      setShowSettings(true);
+      return;
+    }
     setIsPreviewingVoice(v);
     const selectedLanguage = customLanguage || language;
     try {
-      const ai = new AIService(userApiKey, aiProvider, scriptModel, imageModel);
+      const ai = new AIService(
+        userApiKey, 
+        aiProvider, 
+        scriptModel, 
+        imageModel,
+        (stats, logs) => {
+          setSessionStats(stats);
+          setSessionLogs(logs);
+          if (stats.currentKeyIndex !== sessionStats.currentKeyIndex) {
+            setRotationMessage(`Switching to API Key #${stats.currentKeyIndex + 1}...`);
+            setTimeout(() => setRotationMessage(null), 3000);
+          }
+        }
+      );
       const audioDataUrl = await ai.generateVoicePreview(v, selectedLanguage);
       const audio = new Audio(audioDataUrl);
       audio.onended = () => setIsPreviewingVoice(null);
@@ -402,38 +428,17 @@ export default function App() {
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  const testConnection = async () => {
-    if (!userApiKey) {
-      setTestResult({ success: false, message: "Please enter an API key" });
-      return;
-    }
-    setIsTestingKey(true);
-    setTestResult(null);
-    try {
-      const ai = new AIService(userApiKey, aiProvider, scriptModel, imageModel);
-      setSessionRequests(prev => prev + 1);
-      // Simple test call
-      if (aiProvider === 'gemini') {
-        await ai.checkLanguageAvailability('English');
-        // If that passes, try a very small generation
-        const testScript = await ai.generateScript("test", "English");
-        if (testScript) {
-          setTestResult({ success: true, message: "Connection successful! Your key is working." });
-        }
-      } else {
-        setTestResult({ success: true, message: "Key set. Ready to generate." });
-      }
-    } catch (err: any) {
-      console.error(err);
-      setTestResult({ success: false, message: err.message || "Connection failed. Check your key and quota." });
-    } finally {
-      setIsTestingKey(false);
-    }
-  };
-
   const generateFullShort = async () => {
     const selectedNiche = customNiche || niche;
     const selectedLanguage = customLanguage || language;
+    const activeKey = userApiKey;
+
+    if (!activeKey) {
+      setError("API Key is required. Please enter your API key in the settings panel above.");
+      setShowSettings(true);
+      return;
+    }
+
     if (!selectedNiche) {
       setError("Please select or enter a niche");
       return;
@@ -457,7 +462,22 @@ export default function App() {
     setCurrentSegmentIndex(0);
 
     try {
-      const ai = new AIService(userApiKey, aiProvider, scriptModel, imageModel);
+      const ai = new AIService(
+        userApiKey, 
+        aiProvider, 
+        scriptModel, 
+        imageModel,
+        (stats, logs) => {
+          setSessionStats(stats);
+          setSessionLogs(logs);
+          if (stats.currentKeyIndex !== sessionStats.currentKeyIndex) {
+            setRotationMessage(`Switching to API Key #${stats.currentKeyIndex + 1}...`);
+            setTimeout(() => setRotationMessage(null), 3000);
+          }
+        }
+      );
+      setSessionStats(ai.getStats());
+      setSessionLogs(ai.getStats().logs);
       
       // Check language availability first
       const langStatus = ai.checkLanguageAvailability(selectedLanguage);
@@ -475,9 +495,18 @@ export default function App() {
       setStatus('visual');
       const generatedImages: string[] = [];
       for (let i = 0; i < generatedScript.segments.length; i++) {
+        if (!isImageGenEnabled) {
+          // Use placeholder if AI image generation is disabled
+          const placeholder = `https://picsum.photos/seed/${encodeURIComponent(generatedScript.segments[i].visualPrompt.slice(0, 20))}/1080/1920`;
+          generatedImages.push(placeholder);
+          setImages([...generatedImages]);
+          setProgress(15 + ((i + 1) / generatedScript.segments.length) * 50);
+          continue;
+        }
+
         try {
-          setSessionRequests(prev => prev + 1);
           const img = await ai.generateVisual(generatedScript.segments[i].visualPrompt);
+          setSessionStats(ai.getStats());
           generatedImages.push(img);
           setImages([...generatedImages]); // Update UI incrementally
           setProgress(15 + ((i + 1) / generatedScript.segments.length) * 50);
@@ -497,9 +526,9 @@ export default function App() {
 
       // 3. Voiceover - Now Second
       setStatus('voiceover');
-      setSessionRequests(prev => prev + 1);
       const fullText = generatedScript.segments.map(s => s.text).join(' ');
       const audioDataUrl = await ai.generateVoiceover(fullText, voice, selectedLanguage);
+      setSessionStats(ai.getStats());
       setAudioUrl(audioDataUrl);
       setProgress(90);
       
@@ -533,7 +562,6 @@ export default function App() {
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('play', () => {
       setIsPlaying(true);
-      setShowEndCard(false);
     });
     audio.addEventListener('pause', () => setIsPlaying(false));
     return () => {
@@ -542,6 +570,12 @@ export default function App() {
       audio.removeEventListener('pause', () => setIsPlaying(false));
     };
   }, [audioUrl, script]);
+
+  useEffect(() => {
+    if (showSettings || showLogs) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [showSettings, showLogs]);
 
   const togglePlayback = () => {
     if (audioRef.current?.paused) {
@@ -566,6 +600,20 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <button 
+              onClick={() => setShowLogs(!showLogs)}
+              className="hidden md:flex flex-col items-end gap-0.5 group hover:opacity-80 transition-opacity"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-white/40">Key #{sessionStats.currentKeyIndex + 1}</span>
+                <div className="w-1 h-1 rounded-full bg-emerald-500" />
+                <span className="text-[10px] uppercase tracking-wider font-bold text-white/60">{sessionStats.keyRequests} Req</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <History className="w-2.5 h-2.5 text-white/20 group-hover:text-orange-500 transition-colors" />
+                <span className="text-[9px] uppercase tracking-widest font-medium text-white/20">Session Total: {sessionStats.totalRequests}</span>
+              </div>
+            </button>
+            <button 
               onClick={() => setShowSettings(!showSettings)}
               className={cn(
                 "p-2 rounded-lg transition-colors flex items-center gap-2",
@@ -576,20 +624,129 @@ export default function App() {
               <Key className="w-4 h-4" />
               <span className="text-[10px] uppercase tracking-wider font-bold hidden sm:inline">Settings</span>
             </button>
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-full border border-white/10">
-              <div className={cn(
-                "w-2 h-2 rounded-full",
-                userApiKey !== process.env.GEMINI_API_KEY ? "bg-emerald-500" : "bg-blue-500"
-              )} />
-              <span className="text-[10px] uppercase tracking-wider font-semibold text-white/60">
-                {userApiKey !== process.env.GEMINI_API_KEY ? "Custom API Active" : "Shared API Active"}
-              </span>
-            </div>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-12">
+        {/* Logs Panel */}
+        <AnimatePresence>
+          {showLogs && (
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="mb-12"
+            >
+              <div className="p-8 bg-white/5 rounded-[32px] border border-white/10 space-y-6">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-bold text-white flex items-center gap-3">
+                    <History className="w-5 h-5 text-orange-500" />
+                    Request History
+                  </h2>
+                  <div className="flex items-center gap-4">
+                    {!isKeysUnlocked ? (
+                      <div className="flex items-center gap-2">
+                        <input 
+                          type="password"
+                          placeholder="Secret Key to view API keys"
+                          value={unlockPasscode}
+                          onChange={(e) => {
+                            setUnlockPasscode(e.target.value);
+                            if (e.target.value === '1234') {
+                              setIsKeysUnlocked(true);
+                              setUnlockPasscode('');
+                            }
+                          }}
+                          className="bg-white/5 border border-white/10 rounded-lg px-3 py-1 text-[10px] focus:outline-none focus:border-orange-500 transition-colors w-40"
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                        <Check className="w-3 h-3 text-emerald-500" />
+                        <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Keys Unlocked</span>
+                        <button 
+                          onClick={() => setIsKeysUnlocked(false)}
+                          className="ml-2 text-[10px] text-white/40 hover:text-white underline"
+                        >
+                          Lock
+                        </button>
+                      </div>
+                    )}
+                    <button 
+                      onClick={() => setShowLogs(false)}
+                      className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                    >
+                      <X className="w-4 h-4 text-white/40" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-white/5 text-white/40 uppercase tracking-widest">
+                        <th className="pb-4 font-bold">Time</th>
+                        <th className="pb-4 font-bold">Type</th>
+                        <th className="pb-4 font-bold">Key Index</th>
+                        <th className="pb-4 font-bold">API Key</th>
+                        <th className="pb-4 font-bold">Model</th>
+                        <th className="pb-4 font-bold">Status</th>
+                        <th className="pb-4 font-bold text-right">Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {sessionLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-8 text-center text-white/20 italic">No requests recorded yet.</td>
+                        </tr>
+                      ) : (
+                        [...sessionLogs].reverse().map((log) => (
+                          <tr key={log.id} className="group hover:bg-white/[0.02] transition-colors">
+                            <td className="py-4 text-white/40">{new Date(log.timestamp).toLocaleTimeString()}</td>
+                            <td className="py-4">
+                              <span className="px-2 py-0.5 rounded-full bg-white/5 text-[10px] font-bold uppercase tracking-wider">
+                                {log.type}
+                              </span>
+                            </td>
+                            <td className="py-4 font-mono text-white/60">#{log.keyIndex + 1}</td>
+                            <td className="py-4 font-mono text-white/40">
+                              {isKeysUnlocked ? (
+                                <span className="text-orange-400">{log.apiKey}</span>
+                              ) : (
+                                <span>••••••••{log.apiKey.slice(-4)}</span>
+                              )}
+                            </td>
+                            <td className="py-4 text-white/60 truncate max-w-[150px]" title={log.model}>{log.model}</td>
+                            <td className="py-4">
+                              <div className="flex items-center gap-2">
+                                <div className={cn(
+                                  "w-1.5 h-1.5 rounded-full",
+                                  log.status === 'success' ? "bg-emerald-500" : log.status === 'error' ? "bg-red-500" : "bg-orange-500 animate-pulse"
+                                )} />
+                                <span className={cn(
+                                  "font-bold uppercase tracking-widest text-[10px]",
+                                  log.status === 'success' ? "text-emerald-500" : log.status === 'error' ? "text-red-500" : "text-orange-500"
+                                )}>
+                                  {log.status}
+                                </span>
+                              </div>
+                              {log.error && <p className="text-[9px] text-red-400/60 mt-1 line-clamp-1" title={log.error}>{log.error}</p>}
+                            </td>
+                            <td className="py-4 text-right font-mono text-white/40">
+                              {log.duration ? `${log.duration}ms` : '-'}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Settings Panel */}
         <AnimatePresence>
           {showSettings && (
@@ -647,39 +804,21 @@ export default function App() {
 
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <label className="text-[10px] uppercase tracking-wider font-bold text-white/40">API Key</label>
-                      {userApiKey === process.env.GEMINI_API_KEY ? (
-                        <span className="text-[10px] text-blue-400 font-bold uppercase">Shared Key</span>
-                      ) : (
-                        <span className="text-[10px] text-green-400 font-bold uppercase">Custom Key</span>
-                      )}
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-white/40">API Keys (Comma-separated for rotation)</label>
                     </div>
                     <div className="relative">
                       <input 
                         type="password"
                         value={userApiKey}
                         onChange={(e) => setUserApiKey(e.target.value)}
-                        placeholder={`Enter ${aiProvider} API Key...`}
+                        placeholder={`Enter one or more ${aiProvider} API Keys...`}
                         className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-orange-500/50 transition-colors"
                       />
-                      {userApiKey !== process.env.GEMINI_API_KEY && (
-                        <button 
-                          onClick={() => setUserApiKey(process.env.GEMINI_API_KEY || '')}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-white/40 hover:text-white font-bold"
-                        >
-                          Reset
-                        </button>
-                      )}
                     </div>
+                    <p className="text-[10px] text-white/30 italic px-1">
+                      Tip: Paste multiple keys separated by commas to enable automatic rotation on errors.
+                    </p>
                     <div className="flex items-center gap-2">
-                      <button 
-                        onClick={testConnection}
-                        disabled={isTestingKey}
-                        className="text-[10px] text-orange-500 font-bold hover:underline flex items-center gap-1"
-                      >
-                        {isTestingKey ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                        Test Connection
-                      </button>
                       <a 
                         href="https://aistudio.google.com/app/plan_and_billing" 
                         target="_blank" 
@@ -689,18 +828,6 @@ export default function App() {
                         <ExternalLink className="w-3 h-3" />
                         Check Quota Dashboard
                       </a>
-                    </div>
-                    {testResult && (
-                      <div className={cn(
-                        "text-[10px] font-medium p-2 rounded-lg bg-black/20 border border-white/5",
-                        testResult.success ? "text-green-400" : "text-red-400"
-                      )}>
-                        {testResult.message}
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between pt-1">
-                      <span className="text-[10px] text-white/20 font-medium">Session Requests:</span>
-                      <span className="text-[10px] text-white/40 font-mono">{sessionRequests}</span>
                     </div>
                   </div>
 
@@ -800,7 +927,28 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="pt-4 border-t border-white/5">
+                  <div className="pt-4 border-t border-white/5 space-y-4">
+                    <div 
+                      onClick={() => setIsImageGenEnabled(!isImageGenEnabled)}
+                      className="flex items-center gap-3 cursor-pointer group"
+                    >
+                      <div 
+                        className={cn(
+                          "w-10 h-5 rounded-full transition-colors relative",
+                          isImageGenEnabled ? "bg-orange-500" : "bg-white/10"
+                        )}
+                      >
+                        <div className={cn(
+                          "absolute top-1 w-3 h-3 rounded-full bg-white transition-all",
+                          isImageGenEnabled ? "left-6" : "left-1"
+                        )} />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-bold text-white group-hover:text-orange-400 transition-colors">AI Image Generation</span>
+                        <span className="text-[10px] text-white/40">Toggle off to manually upload images for each scene.</span>
+                      </div>
+                    </div>
+
                     <div 
                       onClick={() => setSkipFailedImages(!skipFailedImages)}
                       className="flex items-center gap-3 cursor-pointer group"
@@ -833,7 +981,7 @@ export default function App() {
         <div className="lg:col-span-5 space-y-8">
           <section className="space-y-6">
             <div>
-              <h2 className="text-3xl font-bold tracking-tight mb-2">AI Shorts Generator</h2>
+              <h2 className="text-3xl font-bold tracking-tight mb-2">AI Slideshow Generator</h2>
               <p className="text-white/50">Create multi-scene shorts with voiceovers and background music.</p>
             </div>
 
@@ -858,7 +1006,7 @@ export default function App() {
               <div className="relative">
                 <input
                   type="text"
-                  placeholder="Or enter custom content..."
+                  placeholder="Or enter custom niche..."
                   value={customNiche}
                   onChange={(e) => { setCustomNiche(e.target.value); setNiche(''); }}
                   className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-orange-500 transition-colors"
@@ -928,55 +1076,6 @@ export default function App() {
                     </button>
                   </div>
                 ))}
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              <label className="text-xs font-bold uppercase tracking-widest text-white/40 block">End Card Info</label>
-              <div className="flex flex-col gap-3">
-                <input 
-                  type="text"
-                  value={channelName}
-                  onChange={(e) => setChannelName(e.target.value)}
-                  placeholder="Channel/Account Name..."
-                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-orange-500 transition-colors"
-                />
-                <div className="flex gap-4">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="radio" 
-                      name="platform" 
-                      value="youtube" 
-                      checked={platform === 'youtube'}
-                      onChange={() => setPlatform('youtube')}
-                      className="hidden"
-                    />
-                    <div className={cn(
-                      "w-4 h-4 rounded-full border flex items-center justify-center transition-all",
-                      platform === 'youtube' ? "border-red-500 bg-red-500/20" : "border-white/10"
-                    )}>
-                      {platform === 'youtube' && <div className="w-1.5 h-1.5 rounded-full bg-red-500" />}
-                    </div>
-                    <span className={cn("text-xs font-medium transition-colors", platform === 'youtube' ? "text-white" : "text-white/40")}>YouTube</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="radio" 
-                      name="platform" 
-                      value="instagram" 
-                      checked={platform === 'instagram'}
-                      onChange={() => setPlatform('instagram')}
-                      className="hidden"
-                    />
-                    <div className={cn(
-                      "w-4 h-4 rounded-full border flex items-center justify-center transition-all",
-                      platform === 'instagram' ? "border-pink-500 bg-pink-500/20" : "border-white/10"
-                    )}>
-                      {platform === 'instagram' && <div className="w-1.5 h-1.5 rounded-full bg-pink-500" />}
-                    </div>
-                    <span className={cn("text-xs font-medium transition-colors", platform === 'instagram' ? "text-white" : "text-white/40")}>Instagram</span>
-                  </label>
-                </div>
               </div>
             </div>
 
@@ -1166,6 +1265,12 @@ export default function App() {
                       <span className="text-[10px] uppercase tracking-widest font-bold">Processing</span>
                     </div>
                   )}
+                  {rotationMessage && (
+                    <div className="px-3 py-1 bg-orange-500/90 backdrop-blur-md rounded-full border border-orange-400/20 flex items-center gap-2">
+                      <RefreshCw className="w-3 h-3 text-white animate-spin" />
+                      <span className="text-[10px] uppercase tracking-widest font-bold text-white">{rotationMessage}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1261,7 +1366,7 @@ export default function App() {
                     <Video className="w-10 h-10 text-white/20" />
                   </div>
                   <div className="space-y-2">
-                    <p className="text-white/40 font-medium">Short Preview</p>
+                    <p className="text-white/40 font-medium">Slideshow Preview</p>
                     <p className="text-white/20 text-xs">Your multi-scene AI Short will appear here with music and voiceover.</p>
                   </div>
                 </div>
@@ -1411,7 +1516,7 @@ export default function App() {
     </main>
 
       <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-white/5 text-center">
-        <p className="text-white/20 text-xs uppercase tracking-[0.2em]">Anirudh Sai Manepalli</p>
+        <p className="text-white/20 text-xs uppercase tracking-[0.2em]">Powered by Gemini 3 Flash & 2.5 Image</p>
       </footer>
     </div>
   );
